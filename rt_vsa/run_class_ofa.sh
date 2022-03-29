@@ -2,15 +2,22 @@
 
 export PYTHONPATH="`pwd`/../"
 
-for iter in 1 2
+for iter in 1
 do 
-    for mode in "per_class" "all_classes"
+    for mode in "all_classes"
     do
+        if [ ${mode} = "per_class" ]; then
+            search_dataset_path="./imagenet_data/full"
+        else
+            # Use only the subset of the full dataset.
+            search_dataset_path="./imagenet_data/ofa"
+        fi
+
         python3 test_class_ofa.py \
             --calib_bn_dataset "./imagenet_data/ofa" \
-            --dataset_path_all_classes "./imagenet_data/ofa" \
-            --dataset_path_per_class "./imagenet_data/tench" \
-            --random_search_iter 10 \
+            --search_dataset_path ${search_dataset_path} \
+            --test_dataset_path "./imagenet_data/full" \
+            --random_search_iter 1000 \
             --mode ${mode} | tee logs/${mode}_${iter}.log
     done
 done

@@ -18,7 +18,8 @@
 import argparse
 import os
 import torch
-from torchvision import transforms, datasets
+from torchvision import transforms
+from rt_vsa.datasets import SubsetDataset
 import numpy as np
 import time
 import random
@@ -73,7 +74,7 @@ def download_imagenet(imagenet_data_path):
     return
 
 
-def get_dataloader(imagenet_data_path, frame_size=224, type="val"):
+def get_dataloader(imagenet_data_path, frame_size=224, type="val", classes=None):
     def build_val_transform(size):
         return transforms.Compose([
             transforms.Resize(int(math.ceil(size / 0.875))),
@@ -85,10 +86,16 @@ def get_dataloader(imagenet_data_path, frame_size=224, type="val"):
             ),
         ])
 
-    _dataset = datasets.ImageFolder(
-        root=os.path.join(imagenet_data_path, type),
-        transform=build_val_transform(frame_size)
-    )
+    # _dataset = datasets.ImageFolder(
+    #     root=os.path.join(imagenet_data_path, type),
+    #     transform=build_val_transform(frame_size)
+    # )
+    print(
+        f"Created dataloader for {imagenet_data_path}/{type} and classes {classes}")
+    _dataset = SubsetDataset(root_dir=imagenet_data_path,
+                             transform=build_val_transform(frame_size),
+                             classes=classes,
+                             data_type=type)
 
     data_loader = torch.utils.data.DataLoader(
         _dataset,
@@ -158,18 +165,15 @@ def search_subnetwork_es(ofa_network):
 
 
 def search_subnetwork_random(ofa_network, calib_bn_dataset,
-                             dataset_val_path, lat_constraint=30,
+                             data_loader, frame_size=224,
+                             lat_constraint=30,
                              iter=100):
     best_top1 = 0.0
     best_subnet_config = None
 
     target_hardware = 'note10'
-    frame_size = 224
     latency_table = LatencyTable(device=target_hardware)
     i = 0
-    data_loader = get_dataloader(dataset_val_path,
-                                 frame_size=frame_size,
-                                 type="train")
 
     while i < iter:
         subnet_config = ofa_network.sample_active_subnet()
@@ -178,11 +182,13 @@ def search_subnetwork_random(ofa_network, calib_bn_dataset,
 
         # print("frame_size", frame_size=subnet_config["r"][0])
         lat_predicted = latency_table.predict_efficiency(subnet_config)
+        # print("frame_size", frame_size=subnet_config["r"][0])
         # only accept the subnet_config which has latency satisfied
-        if lat_constraint > lat_predicted:
+        if lat_constraint <= lat_predicted:
             continue
 
-        print("Computing accuracy of the subnet")
+        print(
+            f"Computing accuracy of the subnet with predicted latency {lat_predicted}")
         top1 = compute_subnet_accuracy(ofa_network, subnet_config,
                                        calib_bn_dataset, data_loader)
         if top1 > best_top1:
@@ -222,26 +228,28 @@ def test_full_ofa(opts):
     print('The OFA Network is ready.')
 
     # prepare dataloaders
-    download_imagenet(opts.dataset_path_all_classes)
-    data_loader_all_classes = get_dataloader(opts.dataset_path_all_classes,
+    download_imagenet("imagenet_data/ofa")
+    data_loader_all_classes = get_dataloader(opts.test_dataset_path,
                                              frame_size=224,
-                                             type="val")
-    data_loader_per_class = get_dataloader(opts.dataset_path_per_class,
+                                             type="val",
+                                             classes=None)
+    data_loader_per_class = get_dataloader(opts.test_dataset_path,
                                            frame_size=224,
-                                           type="val")
+                                           type="val",
+                                           classes=opts.classes_list)
 
     # Evaluate full ofa network on the dataset
     top1_all_classes = validate_network(net=ofa_network, path=None, image_size=224,
                                         data_loader=data_loader_all_classes, batch_size=256,
                                         device='cuda')
     print(f"Top1 accuracy {top1_all_classes} of full ofa on all "
-          f"classes {opts.dataset_path_all_classes} validation set ")
+          f"classes {opts.test_dataset_path} validation set ")
 
     top1_per_classes = validate_network(net=ofa_network, path=None, image_size=224,
                                         data_loader=data_loader_per_class, batch_size=256,
                                         device='cuda')
     print(f"Top1 accuracy {top1_per_classes} of full ofa on per "
-          f"class {opts.dataset_path_per_class} validation set ")
+          f"class {opts.test_dataset_path} validation set ")
     return ofa_network
 
 
@@ -251,10 +259,10 @@ def parse_args():
     parser.add_argument("--ofa_base_network", type=str,
                         default="ofa_mbv3_d234_e346_k357_w1.2",
                         help="OFA full base network")
-    parser.add_argument("--dataset_path_all_classes", type=str,
-                        default="imagenet_data/ofa", help="All classes dataset path")
-    parser.add_argument("--dataset_path_per_class", type=str,
-                        default="imagenet_data/tench", help="Per class dataset path")
+    parser.add_argument("--search_dataset_path", type=str,
+                        default="imagenet_data/full", help="Dataset to use search for networks")
+    parser.add_argument("--test_dataset_path", type=str,
+                        default="imagenet_data/full", help="Dataset to test the searched network")
     parser.add_argument("--calib_bn_dataset", type=str,
                         default="imagenet_data/ofa",
                         help="Calibration batch normalization dataset path")
@@ -263,11 +271,19 @@ def parse_args():
                         help="Sub network search function")
     parser.add_argument("--random_search_iter", type=int, default=10,
                         help="Number of iterations for the random search")
+    parser.add_argument("--classes_list", type=str, default="0",
+                        help="Comma separated list of classes to consider")
+    parser.add_argument("--num_classes", type=str, default=1000,
+                        help="Number of classes in the dataset")
 
     parser.add_argument("--mode", type=str, default="per_class",
                         help="Running mode")
 
     args = parser.parse_args()
+
+    if args.classes_list is not None:
+        args.classes_list = [int(class_idx)
+                             for class_idx in args.classes_list.split(",")]
     return args
 
 
@@ -276,18 +292,23 @@ def main():
 
     init_setup()
 
-    ofa_network = test_full_ofa(opts)
+    # ofa_network = test_full_ofa(opts)
 
     # Search optimal subnetwork
     # for mode in ["ALL_CLASSES", "PER_CLASS"]:
     print(f"{opts.network_search_type} search network with")
-    # ofa_network = ofa_net(opts.ofa_base_network, pretrained=True)
+    ofa_network = ofa_net(opts.ofa_base_network, pretrained=True)
     if opts.network_search_type == "random":
-        dataset_val_path = opts.dataset_path_per_class if opts.mode == "per_class" else opts.dataset_path_all_classes
+        classes = opts.classes_list if opts.mode == "per_class" else None
+        data_loader = get_dataloader(opts.search_dataset_path,
+                                     frame_size=224,
+                                     type="train",
+                                     classes=classes)
+
         best_top1, best_subnet_config = search_subnetwork(random=True,
                                                           ofa_network=ofa_network,
                                                           calib_bn_dataset=opts.calib_bn_dataset,
-                                                          dataset_val_path=dataset_val_path,
+                                                          data_loader=data_loader,
                                                           iter=opts.random_search_iter)
     elif opts.network_search_type == "evolutionary":
         best_top1, best_subnet_config = search_subnetwork(random=False,
@@ -301,15 +322,18 @@ def main():
     #                            batch_size=128, device='cuda')
 
     # Method 2.
-
     assert best_subnet_config["r"][0] == 224
-    data_loader_test = get_dataloader(opts.dataset_path_per_class,
-                                      frame_size=best_subnet_config["r"][0],
-                                      type="val")
-    top1_subnet_test = compute_subnet_accuracy(ofa_network, best_subnet_config,
-                                               calib_bn_dataset=opts.calib_bn_dataset,
-                                               data_loader=data_loader_test)
-    print(f"Top1 accuracy {top1_subnet_test} of subnet for {opts.mode}")
+    classes = opts.classes_list if opts.mode == "per_class" else list(
+        range(opts.num_classes))
+    for class_idx in classes:
+        data_loader_test = get_dataloader(opts.test_dataset_path,
+                                          frame_size=best_subnet_config["r"][0],
+                                          type="val",
+                                          classes=[class_idx])
+        top1_subnet_test = compute_subnet_accuracy(ofa_network, best_subnet_config,
+                                                   calib_bn_dataset=opts.calib_bn_dataset,
+                                                   data_loader=data_loader_test)
+        print(f"Top1 accuracy {top1_subnet_test} of subnet for {class_idx}")
 
 
 if __name__ == "__main__":
