@@ -215,6 +215,7 @@ def compute_subnet_accuracy(ofa_network, subnet_config, calib_bn_dataset, data_l
     ofa_network.set_active_subnet(
         ks=subnet_config['ks'], d=subnet_config['d'], e=subnet_config['e'])
     ofa_subnet = ofa_network.get_active_subnet()
+    ofa_subnet.cuda()
     calib_bn(ofa_subnet, calib_bn_dataset,
              subnet_config["r"][0], batch_size=256)
     top1 = validate_network(net=ofa_subnet, path=None, image_size=subnet_config['r'][0],
@@ -298,6 +299,7 @@ def main():
     # for mode in ["ALL_CLASSES", "PER_CLASS"]:
     print(f"{opts.network_search_type} search network with")
     ofa_network = ofa_net(opts.ofa_base_network, pretrained=True)
+    ofa_network.cuda()
     if opts.network_search_type == "random":
         classes = opts.classes_list if opts.mode == "per_class" else None
         data_loader = get_dataloader(opts.search_dataset_path,
@@ -313,6 +315,11 @@ def main():
     elif opts.network_search_type == "evolutionary":
         best_top1, best_subnet_config = search_subnetwork(random=False,
                                                           ofa_network=ofa_network)
+    # best_subnet_config = {'ks': [3, 3, 7, 5, 7, 3, 5, 7, 7, 3, 3, 5, 3, 3, 3, 7, 7, 3, 5, 7],
+    #                       'e': [3, 3, 6, 3, 4, 6, 3, 4, 6, 3, 4, 4, 4, 4, 6, 3, 6, 3, 3, 3],
+    #                       'd': [2, 3, 2, 3, 2],
+    #                       'r': [224],
+    #                       'wid': None}
     print(best_subnet_config)
 
     # Evaluate subnets.
@@ -325,6 +332,7 @@ def main():
     assert best_subnet_config["r"][0] == 224
     classes = opts.classes_list if opts.mode == "per_class" else list(
         range(opts.num_classes))
+    print_str = "\n{:<20s}{:<20s}".format("Class", "Accuracy")
     for class_idx in classes:
         data_loader_test = get_dataloader(opts.test_dataset_path,
                                           frame_size=best_subnet_config["r"][0],
@@ -333,7 +341,9 @@ def main():
         top1_subnet_test = compute_subnet_accuracy(ofa_network, best_subnet_config,
                                                    calib_bn_dataset=opts.calib_bn_dataset,
                                                    data_loader=data_loader_test)
-        print(f"Top1 accuracy {top1_subnet_test} of subnet for {class_idx}")
+        print_str += "\n{:<20d}{:<20.4f}".format(class_idx, top1_subnet_test)
+        # print(f"Top1 accuracy {top1_subnet_test} of subnet for {class_idx}")
+    print(print_str)
 
 
 if __name__ == "__main__":
