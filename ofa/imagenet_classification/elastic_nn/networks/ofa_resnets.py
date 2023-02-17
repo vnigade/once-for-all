@@ -1,4 +1,5 @@
 import random
+import time
 
 from ofa.imagenet_classification.elastic_nn.modules.dynamic_layers import (
     DynamicConvLayer,
@@ -123,7 +124,8 @@ class OFAResNets(ResNets):
     def name():
         return "OFAResNets"
 
-    def forward(self, x):
+    def forward(self, x, stats=False):
+        t1 = time.time()
         for layer in self.input_stem:
             if (
                 self.input_stem_skipping > 0
@@ -134,13 +136,38 @@ class OFAResNets(ResNets):
             else:
                 x = layer(x)
         x = self.max_pooling(x)
-        for stage_id, block_idx in enumerate(self.grouped_block_index):
+
+        # First component for the early-exit one
+        for stage_id in range(0, 2):
+            block_idx = self.grouped_block_index[stage_id]
             depth_param = self.runtime_depth[stage_id]
             active_idx = block_idx[: len(block_idx) - depth_param]
             for idx in active_idx:
                 x = self.blocks[idx](x)
+
+        t2 = time.time()
+        first_component_time = (t2 - t1) * 1e3
+        t1 = time.time()
+        # Second component for the early-exit one
+        for stage_id in range(2, 4):
+            block_idx = self.grouped_block_index[stage_id]
+            depth_param = self.runtime_depth[stage_id]
+            active_idx = block_idx[: len(block_idx) - depth_param]
+            for idx in active_idx:
+                x = self.blocks[idx](x)
+
+        t2 = time.time()
+        second_component_time = (t2 - t1) * 1e3
+
+        t1 = time.time()
         x = self.global_avg_pool(x)
         x = self.classifier(x)
+        t2 = time.time()
+        classifier_time = (t2 - t1) * 1e3
+        
+        if stats == True:
+            return x, (first_component_time, second_component_time, classifier_time)
+        
         return x
 
     @property
@@ -210,6 +237,9 @@ class OFAResNets(ResNets):
         depth = val2list(d, len(ResNets.BASE_DEPTH_LIST) + 1)
         expand_ratio = val2list(e, len(self.blocks))
         width_mult = val2list(w, len(ResNets.BASE_DEPTH_LIST) + 2)
+        # width_mult = [0, 0, 0, 0, 0, 0]
+        width_mult = [0, 0, 0, 2, 2, 2]
+        # depth = [0, 0, 0, 2, 2]
 
         for block, e in zip(self.blocks, expand_ratio):
             if e is not None:
